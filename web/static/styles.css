@@ -4942,6 +4942,11 @@ input:checked + .notification-toggle-slider:before {
     background: var(--hover-color);
 }
 
+.cast-control-container {
+    position: relative;
+    display: inline-block;
+}
+
 .speed-control-container {
     position: relative;
     display: inline-block;

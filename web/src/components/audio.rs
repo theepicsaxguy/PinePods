@@ -25,6 +25,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::JsFuture;
 use web_sys::{window, HtmlAudioElement, HtmlElement, HtmlInputElement, TouchEvent};
 use yew::prelude::*;
 use yew::{function_component, html, Callback, Html};
@@ -122,7 +123,7 @@ pub fn volume_control(props: &VolumeControlProps) -> Html {
     };
 
     let on_volume_change = {
-        let on_volume_change = props.on_volume_change.clone();
+        let on_volume_change = on_volume_change.clone();
         Callback::from(move |e: InputEvent| {
             let input: HtmlInputElement = e.target_unchecked_into();
             if let Ok(volume) = input.value().parse::<f64>() {
@@ -154,6 +155,103 @@ pub fn volume_control(props: &VolumeControlProps) -> Html {
                     oninput={on_volume_change}
                 />
             </div>
+        </div>
+    }
+}
+
+#[derive(Properties, PartialEq)]
+pub struct CastControlProps {
+    pub is_casting: bool,
+    pub on_cast_click: Callback<()>,
+    pub src: String,
+    pub title: String,
+    pub artwork_url: String,
+    pub current_time: f64,
+}
+
+#[function_component(CastControl)]
+pub fn cast_control(props: &CastControlProps) -> Html {
+    let i18n_cast = i18nrs::yew::use_translation();
+    let cast_label = i18n_cast.t("audio.cast").to_string();
+    let cast_stop_label = i18n_cast.t("audio.stop_cast").to_string();
+
+    let on_click = {
+        let on_cast_click = props.on_cast_click.clone();
+        let src = props.src.clone();
+        let title = props.title.clone();
+        let artwork_url = props.artwork_url.clone();
+        let current_time = props.current_time;
+        
+        Callback::from(move |_: MouseEvent| {
+            if let Some(win) = web_sys::window() {
+                let global = js_sys::global();
+                
+                let is_casting = js_sys::Reflect::get(&global, &JsValue::from_str("isCasting"))
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                
+                if is_casting {
+                    if let Ok(stop_fn) = js_sys::Reflect::get(&global, &JsValue::from_str("castStop")) {
+                        if let Ok(fn_) = stop_fn.dyn_into::<js_sys::Function>() {
+                            let _ = fn_.call0(&global);
+                        }
+                    }
+                } else {
+                    let src_clone = src.clone();
+                    let title_clone = title.clone();
+                    let artwork_clone = artwork_url.clone();
+                    let current = current_time;
+                    
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let global = js_sys::global();
+                        
+                        if let Ok(request_fn) = js_sys::Reflect::get(&global, &JsValue::from_str("requestCastSession")) {
+                            if let Ok(fn_) = request_fn.dyn_into::<js_sys::Function>() {
+                                match fn_.call0(&global) {
+                                    Ok(promise_val) => {
+                                        if let Ok(promise) = promise_val.dyn_into::<js_sys::Promise>() {
+                                            let _ = JsFuture::from(promise).await;
+                                            
+                                            if let Ok(load_fn) = js_sys::Reflect::get(&global, &JsValue::from_str("loadMediaToCast")) {
+                                                if let Ok(fn_) = load_fn.dyn_into::<js_sys::Function>() {
+                                                    let _ = fn_.call3(
+                                                        &global, 
+                                                        &JsValue::from_str(&src_clone),
+                                                        &JsValue::from_str(&title_clone),
+                                                        &JsValue::from_str(&artwork_clone),
+                                                        &JsValue::from(current),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        web_sys::console::log_1(&format!("Cast session error: {:?}", e).into());
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            on_cast_click.emit(());
+        })
+    };
+
+    html! {
+        <div class="cast-control-container">
+            <button
+                onclick={on_click}
+                class="skip-button audio-top-button selector-button font-bold py-2 px-4 mt-3 rounded-full w-10 h-10 flex items-center justify-center"
+                title={if props.is_casting { cast_stop_label.clone() } else { cast_label.clone() }}
+            >
+                if props.is_casting {
+                    <i class="ph ph-screencast text-2xl text-green-500"></i>
+                } else {
+                    <i class="ph ph-screencast text-2xl"></i>
+                }
+            </button>
         </div>
     }
 }
@@ -233,6 +331,39 @@ pub fn audio_player(props: &AudioPlayerProps) -> Html {
                 }
             }
             || ()
+        }
+    });
+
+    // Listen for cast state changes
+    let audio_dispatch = _audio_dispatch.clone();
+    use_effect_with((), {
+        move |_| {
+            let audio_dispatch = audio_dispatch.clone();
+            
+            let closure = Closure::wrap(Box::new(move |event: web_sys::CustomEvent| {
+                if let Some(detail) = event.detail().dyn_ref::<js_sys::Object>() {
+                    if let Ok(is_connected) = js_sys::Reflect::get(detail, &JsValue::from_str("isConnected")) {
+                        let connected = is_connected.as_bool().unwrap_or(false);
+                        audio_dispatch.reduce_mut(move |state| {
+                            state.is_casting = Some(connected);
+                            if !connected {
+                                state.cast_device_name = None;
+                            }
+                        });
+                    }
+                }
+            }) as Box<dyn FnMut(_)>);
+
+            let win = web_sys::window();
+            if let Some(window_obj) = win {
+                let _ = window_obj.add_event_listener_with_callback("castStateChanged", closure.as_ref().unchecked_ref());
+            }
+
+            move || {
+                if let Some(window_obj) = web_sys::window() {
+                    let _ = window_obj.remove_event_listener_with_callback("castStateChanged", closure.as_ref().unchecked_ref());
+                }
+            }
         }
     });
 
@@ -1424,6 +1555,19 @@ pub fn audio_player(props: &AudioPlayerProps) -> Html {
                     <VolumeControl
                         volume={audio_state.audio_volume}
                         on_volume_change={update_volume_closure}
+                    />
+                    <CastControl
+                        is_casting={audio_state.is_casting.unwrap_or(false)}
+                        on_cast_click={Callback::from(move |_| {
+                            let dispatch = _audio_dispatch.clone();
+                            dispatch.reduce_mut(|state| {
+                                state.is_casting = Some(!state.is_casting.unwrap_or(false));
+                            });
+                        })}
+                        src={props.src.clone()}
+                        title={props.title.clone()}
+                        artwork_url={props.artwork_url.clone()}
+                        current_time={audio_state.current_time_seconds}
                     />
                     </div>
                     </div>

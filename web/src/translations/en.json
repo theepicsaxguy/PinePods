@@ -39,7 +39,10 @@
     "no_audio_playing": "No audio playing",
     "no_chapters_available": "No chapters available",
     "shownotes": "Shownotes",
-    "shownotes_unavailable": "Shownotes (Unavailable)"
+    "shownotes_unavailable": "Shownotes (Unavailable)",
+    "cast": "Cast to device",
+    "stop_cast": "Stop casting",
+    "casting_to": "Casting to {device}"
   },
   "auth": {
     "account_created_success": "Account created successfully! You can now login.",
