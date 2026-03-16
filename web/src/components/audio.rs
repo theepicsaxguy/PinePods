@@ -123,7 +123,7 @@ pub fn volume_control(props: &VolumeControlProps) -> Html {
     };
 
     let on_volume_change = {
-        let on_volume_change = on_volume_change.clone();
+        let on_volume_change = props.on_volume_change.clone();
         Callback::from(move |e: InputEvent| {
             let input: HtmlInputElement = e.target_unchecked_into();
             if let Ok(volume) = input.value().parse::<f64>() {
@@ -172,8 +172,8 @@ pub struct CastControlProps {
 #[function_component(CastControl)]
 pub fn cast_control(props: &CastControlProps) -> Html {
     let i18n_cast = i18nrs::yew::use_translation();
-    let cast_label = i18n_cast.t("audio.cast").to_string();
-    let cast_stop_label = i18n_cast.t("audio.stop_cast").to_string();
+    let cast_label = i18n_cast.0.t("audio.cast").to_string();
+    let cast_stop_label = i18n_cast.0.t("audio.stop_cast").to_string();
 
     let on_click = {
         let on_cast_click = props.on_cast_click.clone();
@@ -215,13 +215,12 @@ pub fn cast_control(props: &CastControlProps) -> Html {
                                             
                                             if let Ok(load_fn) = js_sys::Reflect::get(&global, &JsValue::from_str("loadMediaToCast")) {
                                                 if let Ok(fn_) = load_fn.dyn_into::<js_sys::Function>() {
-                                                    let _ = fn_.call3(
-                                                        &global, 
-                                                        &JsValue::from_str(&src_clone),
-                                                        &JsValue::from_str(&title_clone),
-                                                        &JsValue::from_str(&artwork_clone),
-                                                        &JsValue::from(current),
-                                                    );
+                                                    let args = js_sys::Array::new();
+                                                    args.push(&JsValue::from_str(&src_clone));
+                                                    args.push(&JsValue::from_str(&title_clone));
+                                                    args.push(&JsValue::from_str(&artwork_clone));
+                                                    args.push(&JsValue::from(current));
+                                                    let _ = fn_.apply(&global, &args);
                                                 }
                                             }
                                         }
