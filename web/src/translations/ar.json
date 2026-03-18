@@ -39,7 +39,10 @@
     "no_audio_playing": "",
     "no_chapters_available": "",
     "shownotes": "",
-    "shownotes_unavailable": ""
+    "shownotes_unavailable": "",
+    "cast": "",
+    "stop_cast": "",
+    "casting_to": ""
   },
   "auth": {
     "account_created_success": "",
@@ -722,7 +725,12 @@
     "failed_to_update_playback_speed": "",
     "playback_preferences_description": "",
     "range": "",
-    "seconds": ""
+    "seconds": "",
+    "cast_title": "",
+    "cast_description": "",
+    "cast_enable": "",
+    "cast_disable": "",
+    "cast_privacy_note": ""
   },
   "playlist_detail": {
     "almost_done_empty": "",

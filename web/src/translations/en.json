@@ -39,7 +39,10 @@
     "no_audio_playing": "No audio playing",
     "no_chapters_available": "No chapters available",
     "shownotes": "Shownotes",
-    "shownotes_unavailable": "Shownotes (Unavailable)"
+    "shownotes_unavailable": "Shownotes (Unavailable)",
+    "cast": "Cast to device",
+    "stop_cast": "Stop casting",
+    "casting_to": "Casting to {device}"
   },
   "auth": {
     "account_created_success": "Account created successfully! You can now login.",
@@ -723,7 +726,12 @@
     "failed_to_update_playback_speed": "Failed to update playback speed: ",
     "playback_preferences_description": "Configure your playback preferences including default playback speed and auto-complete behavior.",
     "range": "Range: 0.5x - 3.0x",
-    "seconds": "seconds"
+    "seconds": "seconds",
+    "cast_title": "Google Chromecast",
+    "cast_description": "Cast audio to a Chromecast or Google Cast-compatible device on your local network. Only available in Chromium-based browsers.",
+    "cast_enable": "Enable Casting",
+    "cast_disable": "Disable Casting",
+    "cast_privacy_note": "Enabling Cast loads a script from Google's servers (gstatic.com). Disable this if you prefer not to contact Google."
   },
   "playlist_detail": {
     "almost_done_empty": "You don't have any episodes that are near completion. Keep listening!",

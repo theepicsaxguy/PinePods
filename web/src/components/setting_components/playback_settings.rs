@@ -1,6 +1,6 @@
 // src/components/setting_components/playback_settings.rs
 
-use crate::components::context::AppState;
+use crate::components::context::{AppState, UIState};
 use crate::components::gen_funcs::format_error_message;
 use crate::requests::setting_reqs::{call_get_auto_complete_seconds, call_update_auto_complete_seconds};
 use anyhow::Error;
@@ -10,6 +10,7 @@ use web_sys::HtmlInputElement;
 use yew::prelude::*;
 use yewdux::prelude::*;
 use i18nrs::yew::use_translation;
+use wasm_bindgen::JsCast;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SetPlaybackSpeedRequest {
@@ -128,6 +129,7 @@ async fn call_get_user_playback_speed(
 pub fn playback_settings() -> Html {
     let (i18n, _) = use_translation();
     let (state, dispatch) = use_store::<AppState>();
+    let (ui_state, ui_dispatch) = use_store::<UIState>();
     let server_name = state.auth_details.as_ref().map(|ud| ud.server_name.clone());
     let api_key = state.auth_details.as_ref().map(|ud| ud.api_key.clone());
     let user_id = state.user_details.as_ref().map(|ud| ud.UserID);
@@ -146,6 +148,43 @@ pub fn playback_settings() -> Html {
     let i18n_auto_complete_episode_threshold = i18n.t("playback_settings.auto_complete_episode_threshold").to_string();
     let i18n_seconds = i18n.t("playback_settings.seconds").to_string();
     let i18n_auto_complete_description = i18n.t("playback_settings.auto_complete_description").to_string();
+    let i18n_cast_title = i18n.t("playback_settings.cast_title").to_string();
+    let i18n_cast_description = i18n.t("playback_settings.cast_description").to_string();
+    let i18n_cast_enable = i18n.t("playback_settings.cast_enable").to_string();
+    let i18n_cast_disable = i18n.t("playback_settings.cast_disable").to_string();
+    let i18n_cast_privacy_note = i18n.t("playback_settings.cast_privacy_note").to_string();
+
+    // Cast toggle handler
+    let cast_enabled = ui_state.cast_enabled.unwrap_or(false);
+    let on_cast_toggle = {
+        let ui_dispatch = ui_dispatch.clone();
+        Callback::from(move |_: MouseEvent| {
+            let new_value = !cast_enabled;
+            // Persist to localStorage.
+            if let Some(storage) = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+            {
+                let _ = storage.set_item("cast_enabled", if new_value { "true" } else { "false" });
+            }
+            // If enabling, inject the Cast SDK script.
+            if new_value {
+                let global = js_sys::global();
+                if let Ok(v) = js_sys::Reflect::get(&global, &wasm_bindgen::JsValue::from_str("loadCastSdk")) {
+                    if let Ok(f) = v.dyn_into::<js_sys::Function>() {
+                        let _ = f.call0(&global);
+                    }
+                }
+            }
+            ui_dispatch.reduce_mut(move |state| {
+                state.cast_enabled = Some(new_value);
+                if !new_value {
+                    state.cast_available = None;
+                    state.is_casting = Some(false);
+                    state.cast_device_name = None;
+                }
+            });
+        })
+    };
 
     // State for playback speed
     let default_playback_speed = use_state(|| 1.0);
@@ -447,6 +486,29 @@ pub fn playback_settings() -> Html {
                     {(*success_message).clone()}
                 </div>
             }
+
+            // ── Google Cast / Chromecast toggle ───────────────────────────
+            <div class="cast-settings mt-6 border-t pt-6">
+                <h3 class="text-sm font-semibold mb-1">{&i18n_cast_title}</h3>
+                <p class="text-xs text-gray-500 mb-3">{&i18n_cast_description}</p>
+                <div class="flex items-center space-x-3">
+                    <button
+                        class={format!("playback-submit-button {}",
+                            if cast_enabled { "bg-green-600 hover:bg-green-700" } else { "" }
+                        )}
+                        onclick={on_cast_toggle}
+                    >
+                        if cast_enabled {
+                            <i class="ph ph-screencast mr-1"></i>
+                            {&i18n_cast_disable}
+                        } else {
+                            <i class="ph ph-screencast mr-1"></i>
+                            {&i18n_cast_enable}
+                        }
+                    </button>
+                </div>
+                <p class="text-xs text-gray-400 mt-2 italic">{&i18n_cast_privacy_note}</p>
+            </div>
         </div>
     }
 }

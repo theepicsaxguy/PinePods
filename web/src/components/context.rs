@@ -321,6 +321,10 @@ pub struct UIState {
     pub podcast_podroll: Option<Vec<PodrollItem>>,
     pub podcast_value4value: Option<Vec<Value>>,
     pub is_mobile: Option<bool>,
+    pub cast_enabled: Option<bool>,
+    pub cast_available: Option<bool>,
+    pub is_casting: Option<bool>,
+    pub cast_device_name: Option<String>,
 }
 
 impl UIState {
