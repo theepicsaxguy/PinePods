@@ -83,165 +83,225 @@ function toggle_description(guid) {
   }
 }
 
-window.castApiReady = false;
-window.currentCastSession = null;
-window.remotePlayer = null;
-window.remotePlayerController = null;
+// ============================================================
+// Google Cast / Chromecast support
+// ============================================================
+
+// _castState holds all Cast runtime objects. Using a single object
+// avoids polluting the global namespace and makes nullability explicit.
+window._castState = {
+  ready: false,
+  remotePlayer: null,
+  remotePlayerController: null,
+};
+
+// __onGCastApiAvailable must be defined BEFORE the Cast SDK script
+// executes so it is available when the SDK calls it. Defining it here
+// (at module evaluation time, before any lazy-load) is the correct
+// pattern per the Google Cast CAF documentation.
+window.__onGCastApiAvailable = function(isAvailable) {
+  if (isAvailable) {
+    window.initializeCastApi();
+  } else {
+    console.log('[Cast] API not available in this browser');
+    window.dispatchEvent(new CustomEvent('castApiUnavailable'));
+  }
+};
 
 window.initializeCastApi = function() {
-  if (window.castApiReady) return;
-  
+  if (window._castState.ready) return;
+
   if (!window.cast || !window.cast.framework) {
-    console.log("Cast API not available, retrying...");
-    setTimeout(window.initializeCastApi, 500);
+    // SDK injected but framework object not yet present; retry shortly.
+    console.warn('[Cast] framework not yet available, retrying in 200ms');
+    setTimeout(window.initializeCastApi, 200);
     return;
   }
 
   try {
     const castContext = cast.framework.CastContext.getInstance();
-    
+
     castContext.setOptions({
       receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
       autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
       androidReceiverCompatible: true,
     });
 
-    window.remotePlayer = new cast.framework.RemotePlayer();
-    window.remotePlayerController = new cast.framework.RemotePlayerController(window.remotePlayer);
+    window._castState.remotePlayer = new cast.framework.RemotePlayer();
+    window._castState.remotePlayerController = new cast.framework.RemotePlayerController(
+      window._castState.remotePlayer
+    );
 
-    window.remotePlayerController.addEventListener(cast.framework.RemotePlayerEventType.IS_CONNECTED_CHANGED, function(event) {
-      window.dispatchEvent(new CustomEvent('castStateChanged', {
-        detail: { isConnected: window.remotePlayer.isConnected }
-      }));
-    });
+    // Use SESSION_STATE_CHANGED (recommended by Google) for reliable
+    // connect/disconnect events. IS_CONNECTED_CHANGED on RemotePlayer
+    // can miss transitions when the page auto-rejoins a session.
+    castContext.addEventListener(
+      cast.framework.CastContextEventType.SESSION_STATE_CHANGED,
+      function() {
+        const session = castContext.getCurrentSession();
+        const connected = !!session;
+        const deviceName = connected
+          ? (session.getCastDevice().friendlyName || '')
+          : '';
+        window.dispatchEvent(new CustomEvent('castStateChanged', {
+          detail: { isConnected: connected, deviceName: deviceName }
+        }));
+      }
+    );
 
-    window.remotePlayerController.addEventListener(cast.framework.RemotePlayerEventType.MEDIA_INFO_CHANGED, function(event) {
-      window.dispatchEvent(new CustomEvent('castMediaChanged', {
-        detail: { 
-          isPlaying: window.remotePlayer.isPlaying,
-          currentTime: window.remotePlayer.currentTime,
-          volume: window.remotePlayer.volumeLevel
-        }
-      }));
-    });
-
-    window.castApiReady = true;
-    console.log("Cast API initialized successfully");
-    
+    window._castState.ready = true;
+    console.log('[Cast] API initialized successfully');
     window.dispatchEvent(new CustomEvent('castApiReady'));
   } catch (e) {
-    console.error("Error initializing Cast API:", e);
+    console.error('[Cast] Error initializing Cast API:', e);
+    window.dispatchEvent(new CustomEvent('castApiError', {
+      detail: { message: String(e) }
+    }));
   }
 };
 
+// Lazily injects the Cast SDK script. Safe to call multiple times.
+// The callback (window.__onGCastApiAvailable) is already defined above,
+// so it will be present when the SDK calls it after loading.
+window.loadCastSdk = function() {
+  if (document.querySelector('script[data-pinepods-cast]')) return;
+  const s = document.createElement('script');
+  s.src = 'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1';
+  s.setAttribute('data-pinepods-cast', '1');
+  document.head.appendChild(s);
+};
+
 window.requestCastSession = function() {
-  return new Promise((resolve, reject) => {
-    if (!window.castApiReady) {
-      reject(new Error("Cast API not ready"));
+  return new Promise(function(resolve, reject) {
+    if (!window._castState.ready) {
+      reject(new Error('[Cast] API not ready'));
       return;
     }
 
     const castContext = cast.framework.CastContext.getInstance();
-    castContext.requestSession().then(session => {
-      window.currentCastSession = session;
-      console.log("Cast session started:", session.getSessionId());
+
+    // Re-use an already-active session (e.g. auto-joined on page load).
+    const existing = castContext.getCurrentSession();
+    if (existing) {
+      resolve(existing);
+      return;
+    }
+
+    castContext.requestSession().then(function() {
+      const session = castContext.getCurrentSession();
       resolve(session);
-    }).catch(err => {
-      console.error("Cast session error:", err);
+    }).catch(function(err) {
+      console.error('[Cast] Session request error:', err);
       reject(err);
     });
   });
 };
 
-window.loadMediaToCast = function(mediaUrl, title, artworkUrl, startTime = 0) {
-  return new Promise((resolve, reject) => {
-    if (!window.currentCastSession) {
-      reject(new Error("No active Cast session"));
+window.loadMediaToCast = function(mediaUrl, title, artworkUrl, startTime) {
+  startTime = startTime || 0;
+  return new Promise(function(resolve, reject) {
+    // Always use CastContext as the authoritative source for the session.
+    const session = window._castState.ready
+      ? cast.framework.CastContext.getInstance().getCurrentSession()
+      : null;
+
+    if (!session) {
+      reject(new Error('[Cast] No active session'));
       return;
     }
 
-    const session = window.currentCastSession;
+    // Determine MIME type from URL extension (strip query string first).
     let contentType = 'audio/mpeg';
-    if (mediaUrl.endsWith('.m4a') || mediaUrl.endsWith('.aac')) {
+    const path = mediaUrl.split('?')[0].toLowerCase();
+    if (path.endsWith('.m4a') || path.endsWith('.aac')) {
       contentType = 'audio/mp4';
-    } else if (mediaUrl.endsWith('.ogg')) {
+    } else if (path.endsWith('.ogg')) {
       contentType = 'audio/ogg';
+    } else if (path.endsWith('.opus')) {
+      contentType = 'audio/ogg; codecs=opus';
+    } else if (path.endsWith('.flac')) {
+      contentType = 'audio/flac';
+    } else if (path.endsWith('.wav')) {
+      contentType = 'audio/wav';
+    } else if (path.endsWith('.webm')) {
+      contentType = 'audio/webm';
     }
 
     const mediaInfo = new chrome.cast.media.MediaInfo(mediaUrl, contentType);
     mediaInfo.metadata = new chrome.cast.media.MusicTrackMediaMetadata();
     mediaInfo.metadata.title = title || 'Podcast';
+    mediaInfo.metadata.subtitle = 'Pinepods';
     if (artworkUrl) {
-      mediaInfo.metadata.images = [{ url: artworkUrl }];
+      mediaInfo.metadata.images = [new chrome.cast.Image(artworkUrl)];
     }
 
     const loadRequest = new chrome.cast.media.LoadRequest(mediaInfo);
     loadRequest.autoplay = true;
     loadRequest.currentTime = startTime;
 
-    session.loadMedia(loadRequest).then(() => {
-      console.log("Media loaded to Cast device");
+    session.loadMedia(loadRequest).then(function() {
+      console.log('[Cast] Media loaded');
       resolve();
-    }).catch(err => {
-      console.error("Error loading media:", err);
+    }).catch(function(err) {
+      console.error('[Cast] Error loading media:', err);
+      window.dispatchEvent(new CustomEvent('castError', {
+        detail: { message: String(err) }
+      }));
       reject(err);
     });
   });
 };
 
 window.castPlay = function() {
-  if (window.remotePlayer && window.remotePlayerController) {
-    window.remotePlayerController.playOrPause();
+  const rp = window._castState.remotePlayer;
+  const rpc = window._castState.remotePlayerController;
+  if (rp && rpc && !rp.isPlaying) {
+    rpc.playOrPause();
   }
 };
 
 window.castPause = function() {
-  if (window.remotePlayer && window.remotePlayerController) {
-    window.remotePlayerController.playOrPause();
+  const rp = window._castState.remotePlayer;
+  const rpc = window._castState.remotePlayerController;
+  if (rp && rpc && rp.isPlaying) {
+    rpc.playOrPause();
   }
 };
 
 window.castSeekTo = function(time) {
-  if (window.remotePlayer && window.remotePlayerController) {
-    window.remotePlayer.currentTime = time;
-    window.remotePlayerController.seek();
+  const rp = window._castState.remotePlayer;
+  const rpc = window._castState.remotePlayerController;
+  if (rp && rpc) {
+    rp.currentTime = time;
+    rpc.seek();
   }
 };
 
 window.castSetVolume = function(volume) {
-  if (window.remotePlayer && window.remotePlayerController) {
-    window.remotePlayer.volumeLevel = Math.max(0, Math.min(1, volume));
-    window.remotePlayerController.setVolumeLevel();
+  const rp = window._castState.remotePlayer;
+  const rpc = window._castState.remotePlayerController;
+  if (rp && rpc) {
+    rp.volumeLevel = Math.max(0, Math.min(1, volume));
+    rpc.setVolumeLevel();
   }
 };
 
 window.castStop = function() {
-  if (window.currentCastSession) {
-    window.currentCastSession.endSession(true);
-    window.currentCastSession = null;
+  if (!window._castState.ready) return;
+  const session = cast.framework.CastContext.getInstance().getCurrentSession();
+  if (session) {
+    session.endSession(true);
   }
 };
 
+// Returns true when a Cast session is currently active.
+// Uses CastContext (the authoritative source) rather than a cached reference.
 window.isCasting = function() {
-  return window.remotePlayer && window.remotePlayer.isConnected;
+  if (!window._castState.ready) return false;
+  return !!cast.framework.CastContext.getInstance().getCurrentSession();
 };
 
 window.getCastState = function() {
-  if (!window.castApiReady) return 'unavailable';
-  const castContext = cast.framework.CastContext.getInstance();
-  return castContext.getCastState();
+  if (!window._castState.ready) return 'unavailable';
+  return cast.framework.CastContext.getInstance().getCastState();
 };
-
-window.addEventListener('load', function() {
-  if (window.cast && window.cast.framework) {
-    window.initializeCastApi();
-  } else {
-    window['__onGCastApiAvailable'] = function(isAvailable) {
-      if (isAvailable) {
-        window.initializeCastApi();
-      } else {
-        console.log("Cast API not available");
-      }
-    };
-  }
-});

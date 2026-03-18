@@ -39,7 +39,10 @@
     "no_audio_playing": "ZZTEST-NO-AUDIO-PLAYING-ZZTEST",
     "no_chapters_available": "ZZTEST-NO-CHAPTERS-AVAILABLE-ZZTEST",
     "shownotes": "ZZTEST-SHOWNOTES-ZZTEST",
-    "shownotes_unavailable": "ZZTEST-SHOWNOTES-UNAVAILABLE-ZZTEST"
+    "shownotes_unavailable": "ZZTEST-SHOWNOTES-UNAVAILABLE-ZZTEST",
+    "cast": "",
+    "stop_cast": "",
+    "casting_to": ""
   },
   "auth": {
     "account_created_success": "ZZTEST-ACCOUNT-CREATED-SUCCESS-ZZTEST",
@@ -722,7 +725,12 @@
     "failed_to_update_playback_speed": "ZZTEST-FAILED-TO-UPDATE-PLAYBACK-SPEED-ZZTEST",
     "playback_preferences_description": "ZZTEST-PLAYBACK-PREFERENCES-DESCRIPTION-ZZTEST",
     "range": "ZZTEST-RANGE-ZZTEST",
-    "seconds": "ZZTEST-SECONDS-ZZTEST"
+    "seconds": "ZZTEST-SECONDS-ZZTEST",
+    "cast_title": "",
+    "cast_description": "",
+    "cast_enable": "",
+    "cast_disable": "",
+    "cast_privacy_note": ""
   },
   "playlist_detail": {
     "almost_done_empty": "ZZTEST-ALMOST-DONE-EMPTY-ZZTEST",

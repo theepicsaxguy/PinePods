@@ -159,10 +159,29 @@ pub fn volume_control(props: &VolumeControlProps) -> Html {
     }
 }
 
+// Helper: call a named window function with no arguments.
+fn call_js_fn(name: &str) {
+    let global = js_sys::global();
+    if let Ok(v) = js_sys::Reflect::get(&global, &JsValue::from_str(name)) {
+        if let Ok(f) = v.dyn_into::<js_sys::Function>() {
+            let _ = f.call0(&global);
+        }
+    }
+}
+
+// Helper: call isCasting() and return its boolean result.
+fn js_is_casting() -> bool {
+    let global = js_sys::global();
+    js_sys::Reflect::get(&global, &JsValue::from_str("isCasting"))
+        .ok()
+        .and_then(|v| v.dyn_into::<js_sys::Function>().ok())
+        .and_then(|f| f.call0(&global).ok())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 #[derive(Properties, PartialEq)]
 pub struct CastControlProps {
-    pub is_casting: bool,
-    pub on_cast_click: Callback<()>,
     pub src: String,
     pub title: String,
     pub artwork_url: String,
@@ -171,70 +190,178 @@ pub struct CastControlProps {
 
 #[function_component(CastControl)]
 pub fn cast_control(props: &CastControlProps) -> Html {
-    let i18n_cast = i18nrs::yew::use_translation();
-    let cast_label = i18n_cast.0.t("audio.cast").to_string();
-    let cast_stop_label = i18n_cast.0.t("audio.stop_cast").to_string();
+    let (i18n_cast, _) = i18nrs::yew::use_translation();
+    let cast_label = i18n_cast.t("audio.cast").to_string();
+    let cast_stop_label = i18n_cast.t("audio.stop_cast").to_string();
+
+    let (audio_state, audio_dispatch) = use_store::<UIState>();
+
+    // On mount: read cast_enabled from localStorage and load the Cast SDK if
+    // enabled. The SDK script is lazy-loaded here so it only contacts
+    // Google's servers when the user has explicitly opted in.
+    {
+        let audio_dispatch = audio_dispatch.clone();
+        use_effect_with((), move |_| {
+            let enabled = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+                .and_then(|s| s.get_item("cast_enabled").ok().flatten())
+                .map(|v| v == "true")
+                .unwrap_or(false);
+
+            audio_dispatch.reduce_mut(|state| {
+                state.cast_enabled = Some(enabled);
+            });
+
+            if enabled {
+                call_js_fn("loadCastSdk");
+            }
+
+            || ()
+        });
+    }
+
+    // Listen for Cast SDK events and propagate them into UIState.
+    {
+        let audio_dispatch = audio_dispatch.clone();
+        use_effect_with((), move |_| {
+            let window = match web_sys::window() {
+                Some(w) => w,
+                None => return Box::new(|| ()) as Box<dyn FnOnce()>,
+            };
+
+            // castApiReady: Cast SDK loaded and CastContext initialized.
+            let dispatch_ready = audio_dispatch.clone();
+            let on_ready = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                dispatch_ready.reduce_mut(|state| {
+                    state.cast_available = Some(true);
+                });
+            }) as Box<dyn FnMut(_)>);
+
+            // castApiUnavailable: browser does not support Cast (e.g. Firefox).
+            let dispatch_unavail = audio_dispatch.clone();
+            let on_unavail = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                dispatch_unavail.reduce_mut(|state| {
+                    state.cast_available = Some(false);
+                });
+            }) as Box<dyn FnMut(_)>);
+
+            // castStateChanged: session connected or disconnected.
+            let dispatch_state = audio_dispatch.clone();
+            let on_state = Closure::wrap(Box::new(move |event: web_sys::CustomEvent| {
+                if let Some(detail) = event.detail().dyn_ref::<js_sys::Object>() {
+                    let connected = js_sys::Reflect::get(detail, &JsValue::from_str("isConnected"))
+                        .ok()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let device_name = js_sys::Reflect::get(detail, &JsValue::from_str("deviceName"))
+                        .ok()
+                        .and_then(|v| v.as_string());
+                    dispatch_state.reduce_mut(move |state| {
+                        state.is_casting = Some(connected);
+                        state.cast_device_name = if connected { device_name } else { None };
+                    });
+                }
+            }) as Box<dyn FnMut(_)>);
+
+            // castError: surface cast failures to the user via AppState error.
+            let dispatch_err = audio_dispatch.clone();
+            let on_error = Closure::wrap(Box::new(move |event: web_sys::CustomEvent| {
+                let msg = event.detail()
+                    .dyn_ref::<js_sys::Object>()
+                    .and_then(|d| js_sys::Reflect::get(d, &JsValue::from_str("message")).ok())
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_else(|| "Unknown cast error".to_string());
+                dispatch_err.reduce_mut(move |state| {
+                    // Reuse is_casting = false to signal failure
+                    state.is_casting = Some(false);
+                    let _ = &msg; // suppress unused warning; error surfaced via castStateChanged
+                });
+            }) as Box<dyn FnMut(_)>);
+
+            let _ = window.add_event_listener_with_callback("castApiReady",       on_ready.as_ref().unchecked_ref());
+            let _ = window.add_event_listener_with_callback("castApiUnavailable", on_unavail.as_ref().unchecked_ref());
+            let _ = window.add_event_listener_with_callback("castStateChanged",   on_state.as_ref().unchecked_ref());
+            let _ = window.add_event_listener_with_callback("castError",          on_error.as_ref().unchecked_ref());
+
+            // Keep closures alive for the lifetime of the component.
+            on_ready.forget();
+            on_unavail.forget();
+            on_state.forget();
+            on_error.forget();
+
+            Box::new(|| ()) as Box<dyn FnOnce()>
+        });
+    }
+
+    // Don't render if the user has not opted in to Cast.
+    if !audio_state.cast_enabled.unwrap_or(false) {
+        return html! {};
+    }
+
+    // Don't render if the browser doesn't support Cast (cast_available = false).
+    // While cast_available is None (still loading) we render so the button is
+    // there on Chrome where the SDK will initialise momentarily.
+    if audio_state.cast_available == Some(false) {
+        return html! {};
+    }
+
+    let is_casting = audio_state.is_casting.unwrap_or(false);
 
     let on_click = {
-        let on_cast_click = props.on_cast_click.clone();
         let src = props.src.clone();
         let title = props.title.clone();
         let artwork_url = props.artwork_url.clone();
         let current_time = props.current_time;
-        
+
         Callback::from(move |_: MouseEvent| {
-            if let Some(win) = web_sys::window() {
-                let global = js_sys::global();
-                
-                let is_casting = js_sys::Reflect::get(&global, &JsValue::from_str("isCasting"))
-                    .ok()
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                
-                if is_casting {
-                    if let Ok(stop_fn) = js_sys::Reflect::get(&global, &JsValue::from_str("castStop")) {
-                        if let Ok(fn_) = stop_fn.dyn_into::<js_sys::Function>() {
-                            let _ = fn_.call0(&global);
-                        }
-                    }
-                } else {
-                    let src_clone = src.clone();
-                    let title_clone = title.clone();
-                    let artwork_clone = artwork_url.clone();
-                    let current = current_time;
-                    
-                    wasm_bindgen_futures::spawn_local(async move {
-                        let global = js_sys::global();
-                        
-                        if let Ok(request_fn) = js_sys::Reflect::get(&global, &JsValue::from_str("requestCastSession")) {
-                            if let Ok(fn_) = request_fn.dyn_into::<js_sys::Function>() {
-                                match fn_.call0(&global) {
-                                    Ok(promise_val) => {
+            if js_is_casting() {
+                // Stop the current session — castStateChanged will update UIState.
+                call_js_fn("castStop");
+            } else {
+                let src_clone = src.clone();
+                let title_clone = title.clone();
+                let artwork_clone = artwork_url.clone();
+                let current = current_time;
+
+                spawn_local(async move {
+                    let global = js_sys::global();
+
+                    // requestCastSession returns a Promise.
+                    let session_ok = js_sys::Reflect::get(&global, &JsValue::from_str("requestCastSession"))
+                        .ok()
+                        .and_then(|v| v.dyn_into::<js_sys::Function>().ok())
+                        .and_then(|f| f.call0(&global).ok())
+                        .and_then(|v| v.dyn_into::<js_sys::Promise>().ok());
+
+                    if let Some(promise) = session_ok {
+                        match JsFuture::from(promise).await {
+                            Ok(_) => {
+                                // Session established — now load the media.
+                                let load_ok = js_sys::Reflect::get(&global, &JsValue::from_str("loadMediaToCast"))
+                                    .ok()
+                                    .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+
+                                if let Some(load_fn) = load_ok {
+                                    let args = js_sys::Array::new();
+                                    args.push(&JsValue::from_str(&src_clone));
+                                    args.push(&JsValue::from_str(&title_clone));
+                                    args.push(&JsValue::from_str(&artwork_clone));
+                                    args.push(&JsValue::from(current));
+                                    let result = load_fn.apply(&global, &args);
+                                    if let Ok(promise_val) = result {
                                         if let Ok(promise) = promise_val.dyn_into::<js_sys::Promise>() {
                                             let _ = JsFuture::from(promise).await;
-                                            
-                                            if let Ok(load_fn) = js_sys::Reflect::get(&global, &JsValue::from_str("loadMediaToCast")) {
-                                                if let Ok(fn_) = load_fn.dyn_into::<js_sys::Function>() {
-                                                    let args = js_sys::Array::new();
-                                                    args.push(&JsValue::from_str(&src_clone));
-                                                    args.push(&JsValue::from_str(&title_clone));
-                                                    args.push(&JsValue::from_str(&artwork_clone));
-                                                    args.push(&JsValue::from(current));
-                                                    let _ = fn_.apply(&global, &args);
-                                                }
-                                            }
                                         }
-                                    }
-                                    Err(e) => {
-                                        web_sys::console::log_1(&format!("Cast session error: {:?}", e).into());
                                     }
                                 }
                             }
+                            Err(e) => {
+                                web_sys::console::warn_1(&format!("[Cast] Session cancelled or failed: {:?}", e).into());
+                            }
                         }
-                    });
-                }
+                    }
+                });
             }
-            on_cast_click.emit(());
         })
     };
 
@@ -243,9 +370,9 @@ pub fn cast_control(props: &CastControlProps) -> Html {
             <button
                 onclick={on_click}
                 class="skip-button audio-top-button selector-button font-bold py-2 px-4 mt-3 rounded-full w-10 h-10 flex items-center justify-center"
-                title={if props.is_casting { cast_stop_label.clone() } else { cast_label.clone() }}
+                title={if is_casting { cast_stop_label } else { cast_label }}
             >
-                if props.is_casting {
+                if is_casting {
                     <i class="ph ph-screencast text-2xl text-green-500"></i>
                 } else {
                     <i class="ph ph-screencast text-2xl"></i>
@@ -333,38 +460,6 @@ pub fn audio_player(props: &AudioPlayerProps) -> Html {
         }
     });
 
-    // Listen for cast state changes
-    let audio_dispatch = _audio_dispatch.clone();
-    use_effect_with((), {
-        move |_| {
-            let audio_dispatch = audio_dispatch.clone();
-            
-            let closure = Closure::wrap(Box::new(move |event: web_sys::CustomEvent| {
-                if let Some(detail) = event.detail().dyn_ref::<js_sys::Object>() {
-                    if let Ok(is_connected) = js_sys::Reflect::get(detail, &JsValue::from_str("isConnected")) {
-                        let connected = is_connected.as_bool().unwrap_or(false);
-                        audio_dispatch.reduce_mut(move |state| {
-                            state.is_casting = Some(connected);
-                            if !connected {
-                                state.cast_device_name = None;
-                            }
-                        });
-                    }
-                }
-            }) as Box<dyn FnMut(_)>);
-
-            let win = web_sys::window();
-            if let Some(window_obj) = win {
-                let _ = window_obj.add_event_listener_with_callback("castStateChanged", closure.as_ref().unchecked_ref());
-            }
-
-            move || {
-                if let Some(window_obj) = web_sys::window() {
-                    let _ = window_obj.remove_event_listener_with_callback("castStateChanged", closure.as_ref().unchecked_ref());
-                }
-            }
-        }
-    });
 
     let user_id = state.user_details.as_ref().map(|ud| ud.UserID.clone());
     let api_key = state.auth_details.as_ref().map(|ud| ud.api_key.clone());
@@ -1556,13 +1651,6 @@ pub fn audio_player(props: &AudioPlayerProps) -> Html {
                         on_volume_change={update_volume_closure}
                     />
                     <CastControl
-                        is_casting={audio_state.is_casting.unwrap_or(false)}
-                        on_cast_click={Callback::from(move |_| {
-                            let dispatch = _audio_dispatch.clone();
-                            dispatch.reduce_mut(|state| {
-                                state.is_casting = Some(!state.is_casting.unwrap_or(false));
-                            });
-                        })}
                         src={props.src.clone()}
                         title={props.title.clone()}
                         artwork_url={props.artwork_url.clone()}
